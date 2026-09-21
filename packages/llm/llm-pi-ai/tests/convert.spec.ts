@@ -942,6 +942,18 @@ describe('mapStopReason / mapUsage', () => {
       .toMatchObject({ kind: 'error', failure: { code: 'TRANSPORT' } })
   })
 
+  it.each([
+    // A relay that cannot reach its own upstream sends `response.failed`, which
+    // pi-ai renders as `${code}: ${message}`; both the observed relay wording and
+    // a bare code must stay retryable rather than falling through to PI_AI_ERROR.
+    'upstream_error: Upstream request failed',
+    'upstream_error',
+    'upstream request failed',
+  ])('maps relay upstream wording %j to a retryable SERVER failure', (errorMessage) => {
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
+      .toMatchObject({ kind: 'error', failure: { code: 'SERVER' } })
+  })
+
   it('uses pi-ai provider-specific overflow classification without losing rate-limit exclusions', () => {
     expect(mapStopReason(assistant({
       stopReason: 'error',
