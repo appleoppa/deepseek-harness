@@ -1,11 +1,23 @@
 /** Browser launch-token and persistent-cookie behavior. */
 
 import { createHmac } from 'node:crypto'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import { BrowserAuth } from '../src/browser-auth.ts'
 import type { ConnectionIndexRequest, ConnectionIndexResponse } from '../src/rpc.ts'
 import { RecordCredentials } from './browser-credentials.ts'
+
+const tempHomes: string[] = []
+
+/** Mint an isolated Harness home so the persisted launch token never reaches the real one. */
+function tempHome(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-browser-auth-'))
+  tempHomes.push(dir)
+  return dir
+}
 
 function signedCookie(store: RecordCredentials, name: string, payload: unknown): string {
   const body = typeof payload === 'string'
@@ -88,6 +100,12 @@ function exchange(
 
 afterEach(() => {
   vi.useRealTimers()
+  vi.unstubAllEnvs()
+  for (const dir of tempHomes.splice(0)) rmSync(dir, { recursive: true, force: true })
+})
+
+beforeEach(() => {
+  vi.stubEnv('DSH_HOME', tempHome())
 })
 
 describe('BrowserAuth', () => {
@@ -119,14 +137,44 @@ describe('BrowserAuth', () => {
     expect(reloaded.authenticatedUrl('http://127.0.0.1:3080')).toBe(login.launchUrl)
     expect(reloaded.isAuthenticated(request('/', '127.0.0.1:3080', { cookie: login.cookie }))).toBe(true)
 
+    // A restart keeps the bookmark working: the token is read back from the
+    // Harness home instead of rotating, and is stored readable only by its owner.
     const restarted = await createAuth(store)
-    expect(new URL(restarted.authenticatedUrl('http://127.0.0.1:3080')).searchParams.get('token'))
-      .not.toBe(new URL(login.launchUrl).searchParams.get('token'))
+    expect(restarted.authenticatedUrl('http://127.0.0.1:3080')).toBe(login.launchUrl)
     expect(restarted.isAuthenticated(request('/', '127.0.0.1:3080', { cookie: login.cookie }))).toBe(true)
-    const staleUrl = new URL(login.launchUrl)
+    const tokenFile = join(process.env['DSH_HOME']!, 'browser-launch-token')
+    expect(readFileSync(tokenFile, 'utf8').trim())
+      .toBe(new URL(login.launchUrl).searchParams.get('token'))
+    expect(statSync(tokenFile).mode & 0o777).toBe(0o600)
+  })
+
+  it('mints a distinct token for an unrelated Harness home', async () => {
+    const first = await createAuth(new RecordCredentials())
+    const isolated = await createAuth(new RecordCredentials())
+    expect(isolated.authenticatedUrl('http://127.0.0.1:3080')).toBe(first.authenticatedUrl('http://127.0.0.1:3080'))
+
+    vi.stubEnv('DSH_HOME', tempHome())
+    const other = await createAuth(new RecordCredentials())
+    expect(other.authenticatedUrl('http://127.0.0.1:3080'))
+      .not.toBe(first.authenticatedUrl('http://127.0.0.1:3080'))
+  })
+
+  it('replaces an unusable persisted token instead of trusting it', async () => {
+    const file = join(process.env['DSH_HOME']!, 'browser-launch-token')
+    writeFileSync(file, 'not base64url!')
+    const auth = await createAuth(new RecordCredentials())
+    const token = new URL(auth.authenticatedUrl('http://127.0.0.1:3080')).searchParams.get('token')
+    expect(token).not.toBe('not base64url!')
+    expect(readFileSync(file, 'utf8').trim()).toBe(token)
+  })
+
+  it('redirects an unrecognized token URL to the cookie-authorized clean root without reminting', async () => {
+    const store = new RecordCredentials()
+    const auth = await createAuth(store)
+    const login = exchange(auth)
     const redirected = response()
-    expect(restarted.authorizeIndex(request(
-      `${staleUrl.pathname}${staleUrl.search}`,
+    expect(auth.authorizeIndex(request(
+      '/?token=not-the-launch-token',
       '127.0.0.1:3080',
       { cookie: login.cookie },
     ), redirected.value)).toBe(false)

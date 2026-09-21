@@ -1,8 +1,11 @@
 /** Browser-session authentication for the Host Connection carrier. */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { credentialKey } from '@deepseek-ai/dsh-credentials'
 import type { CredentialProvider, CredentialRecord } from '@deepseek-ai/dsh-credentials'
+import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import type {
   ConnectionIndexRequest,
   ConnectionIndexResponse,
@@ -52,9 +55,42 @@ function decodeBase64Url(value: string): Buffer | undefined {
 function processLaunchToken(owner: object): string {
   const existing = PROCESS_LAUNCH_TOKENS.get(owner)
   if (existing !== undefined) return existing
-  const created = encodeBase64Url(randomBytes(SECRET_BYTES))
+  // The launch token must outlive the process: an operator keeps one bookmark
+  // (and one DSH.app entry) pointing at the token URL, and external health
+  // probes read the token back out of the boot log. A per-process token makes
+  // every such probe fail after the first restart and turns a supervisor into a
+  // restart loop, so it is persisted under the Harness home on first mint.
+  const persisted = readPersistedLaunchToken()
+  const created = persisted ?? encodeBase64Url(randomBytes(SECRET_BYTES))
+  if (persisted === undefined) persistLaunchToken(created)
   PROCESS_LAUNCH_TOKENS.set(owner, created)
   return created
+}
+
+const LAUNCH_TOKEN_FILE_NAME = 'browser-launch-token'
+
+function launchTokenFile(): string {
+  return dshHomePath(LAUNCH_TOKEN_FILE_NAME)
+}
+
+function readPersistedLaunchToken(): string | undefined {
+  try {
+    const value = readFileSync(launchTokenFile(), 'utf8').trim()
+    return value.length > 0 && decodeBase64Url(value) !== undefined ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function persistLaunchToken(value: string): void {
+  try {
+    const file = launchTokenFile()
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
+    writeFileSync(file, value, { mode: 0o600 })
+  } catch {
+    // An unwritable DSH_HOME keeps the previous behaviour: the token stays in
+    // this process only, and the operator re-reads it from the boot log.
+  }
 }
 
 function header(
