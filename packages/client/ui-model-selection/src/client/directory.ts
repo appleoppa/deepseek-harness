@@ -8,7 +8,8 @@ import type {
   ModelCatalogFailure, ModelProviderGroup, ModelSelection, ModelSelectionProjection,
 } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
-import type { RemoteResult, TypertClientRemote } from '@deepseek-ai/dsh-typert-protocol'
+import { RemoteError, remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
+import type { RemoteFailure, RemoteResult, TypertClientRemote } from '@deepseek-ai/dsh-typert-protocol'
 import type { ObservableSnapshot, SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { ModelCatalogDirectory } from './catalog.ts'
@@ -90,23 +91,33 @@ export class ModelDirectory {
     this.assertAvailable()
     const generation = ++this.generation
     this.store.update((s) => { s.status = 'selecting'; s.error = null })
-    const result = await this.sessions.selectModel({
-      sessionId: this.sessionId,
-      provider: selection.provider,
-      model: selection.model,
-      ...selection.reasoningEffort === undefined
-        ? {}
-        : { reasoningEffort: selection.reasoningEffort },
-    })
-    if (this.disposed || generation !== this.generation) {
-      return result.ok ? { ok: true, value: undefined } : result
+    // The Remote face folds carrier failures into the error branch, but an
+    // assembly fault (a rejected carrier, an unmounted method) still rejects.
+    // Settle the store here: an escape would leave `status` at 'selecting'
+    // forever, which disables every effort row with no failure shown.
+    let failure: RemoteFailure | undefined
+    try {
+      const outcome = await this.sessions.selectModel({
+        sessionId: this.sessionId,
+        provider: selection.provider,
+        model: selection.model,
+        ...selection.reasoningEffort === undefined
+          ? {}
+          : { reasoningEffort: selection.reasoningEffort },
+      })
+      if (!outcome.ok) failure = outcome.error
+    } catch (error: unknown) {
+      failure = selectFailure(error)
     }
-    if (!result.ok) {
+    if (this.disposed || generation !== this.generation) {
+      return failure === undefined ? { ok: true, value: undefined } : { ok: false, error: failure }
+    }
+    if (failure !== undefined) {
       this.store.update((s) => {
         s.status = 'error'
-        s.error = `${result.error.code}: ${result.error.message}`
+        s.error = `${failure.code}: ${failure.message}`
       })
-      return result
+      return { ok: false, error: failure }
     }
     this.store.update((s) => { s.status = 'ready'; s.error = null })
     this.syncInputs()
@@ -180,4 +191,19 @@ export class ModelDirectory {
 
 function modelSelectionProjection(value: unknown): ModelSelectionProjection | undefined {
   return value === undefined ? undefined : value as ModelSelectionProjection
+}
+
+/**
+ * Present a rejected selection call as a Remote failure so the settle path runs.
+ * @param error - the value the Remote call rejected with.
+ * @returns the branded failure when one crossed the call, else a gateway fault.
+ */
+function selectFailure(error: unknown): RemoteFailure {
+  const branded = remoteErrorOf(error)
+  if (branded !== undefined) return branded
+  return new RemoteError(
+    'gateway/internal',
+    error instanceof Error ? error.message : String(error),
+    {},
+  )
 }

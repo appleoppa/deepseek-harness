@@ -75,6 +75,9 @@ async function bench(locale: 'zh' | 'en' = 'zh') {
   // block follows this, never catalog membership.
   let routable = true
   let selectionFailure: RemoteError<'session/writer-held'> | undefined
+  // A carrier/assembly fault rejects the call instead of resolving with the
+  // error branch; the directory must still settle its store.
+  let selectionRejection: Error | undefined
   const sessionRemote = {
     modelCatalog: () => {
       calls.models += 1
@@ -90,6 +93,7 @@ async function bench(locale: 'zh' | 'en' = 'zh') {
     },
     selectModel: (payload: { sessionId: SessionId; provider: string; model: string; reasoningEffort?: string }) => {
       calls.select += 1
+      if (selectionRejection !== undefined) return Promise.reject(selectionRejection)
       if (selectionFailure !== undefined) return Promise.resolve({ ok: false as const, error: selectionFailure })
       selected = {
         provider: payload.provider,
@@ -183,6 +187,7 @@ async function bench(locale: 'zh' | 'en' = 'zh') {
     rejectSelection: () => {
       selectionFailure = new RemoteError('session/writer-held', 'writer held', { sessionId: sid('owned') })
     },
+    rejectSelectionWith: (error: Error) => { selectionRejection = error },
     setHostCurrent: (selection: ModelSelection) => { defaultSelection = selection },
     setProjected: (id: SessionId, value: ModelSelectionProjection) => { projections.get(id)?.set(value) },
     address: (id: SessionId) => { addressed.add(id) },
@@ -441,5 +446,22 @@ describe('ui-model-selection dual entry', () => {
     b.ctx.emit('connection/reset')
     await Promise.resolve()
     expect(b.calls).toEqual({ models: 2, select: 0 })
+  })
+
+  it('settles the directory when the selection call rejects instead of wedging the picker', async () => {
+    const b = await bench()
+    b.mint('owned')
+    const directory = b.ctx.modelDirectories.directoryFor(sid('owned'))
+    await directory.load()
+    b.rejectSelectionWith(new Error('carrier rejected'))
+
+    const result = await directory.select({ provider: 'deepseek-official', model: 'deepseek-v4-flash' })
+
+    expect(result).toMatchObject({ ok: false, error: { code: 'gateway/internal', message: 'carrier rejected' } })
+    // A stuck 'selecting' status disables every effort row with no failure shown.
+    expect(directory.store.getSnapshot()).toMatchObject({
+      status: 'error',
+      error: 'gateway/internal: carrier rejected',
+    })
   })
 })
