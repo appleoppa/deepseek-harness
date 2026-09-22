@@ -17,12 +17,16 @@ it('ships install metadata with the built web application', async () => {
     start_url: '/',
     scope: '/',
     display: 'fullscreen',
-    icons: [{
-      src: '/favicon.svg',
-      sizes: 'any',
-      type: 'image/svg+xml',
-      purpose: 'any',
-    }],
+    icons: [
+      // PNG sizes come first so installed shells (Safari "Add to Dock") pick the
+      // brand icon rather than the SVG favicon; the favicon stays last as the
+      // any-size fallback.
+      { src: '/apple-touch-icon-180.png', sizes: '180x180', type: 'image/png', purpose: 'any' },
+      { src: '/apple-touch-icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+      { src: '/apple-touch-icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+      { src: '/icon-1024.png', sizes: '1024x1024', type: 'image/png', purpose: 'any' },
+      { src: '/favicon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
+    ],
   })
 })
 

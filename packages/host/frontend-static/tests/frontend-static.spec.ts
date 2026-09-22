@@ -139,6 +139,10 @@ describe('real Loader composition', () => {
     // Unknown extension ships as octet-stream.
     expect(await request(port, '/blob.bin')).toMatchObject({ status: 200, type: 'application/octet-stream', body: 'BLOB' })
 
+    // Install-shell icons must carry an image MIME, not octet-stream.
+    await writeFile(join(root!, 'dist', 'apple-touch-icon-180.png'), 'PNG')
+    expect(await request(port, '/apple-touch-icon-180.png')).toMatchObject({ status: 200, type: 'image/png', body: 'PNG' })
+
     // Only the root and index path render index.html through registered taps.
     const untap = server.tapIndex(html => html.replace('<head>', '<head><script>window.__T__=1</script>'))
     for (const path of ['/', '/index.html', '/?view=test']) {
